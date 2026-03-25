@@ -1,0 +1,557 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+    <title>Typing Clicker</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://unpkg.com/lucide@latest"></script>
+    <style>
+        /* ===== スクロールバー ===== */
+        .custom-scrollbar::-webkit-scrollbar { width: 4px; }
+        .custom-scrollbar::-webkit-scrollbar-track { background: #111827; }
+        .custom-scrollbar::-webkit-scrollbar-thumb { background: #374151; border-radius: 4px; }
+        .custom-scrollbar::-webkit-scrollbar-thumb:hover { background: #4b5563; }
+        .no-scrollbar::-webkit-scrollbar { display: none; }
+        .no-scrollbar { -ms-overflow-style: none; scrollbar-width: none; }
+
+        /* ===== 高さ管理：dvh（動的ビューポート高）でモバイルブラウザのUIを考慮 ===== */
+        html, body { height: 100%; }
+        #app {
+            height: 100dvh; /* dynamic viewport height：モバイルのアドレスバー分を除いた高さ */
+            display: flex;
+            flex-direction: column;
+        }
+        @media (min-width: 768px) {
+            #app { flex-direction: row; }
+        }
+
+        /* ===== 左ペイン：モバイルは固定高さ、PC は全高 ===== */
+        #left-pane {
+            flex-shrink: 0;
+            display: flex;
+            flex-direction: column;
+            overflow-y: auto;
+            /* モバイル：画面の約45%を使う */
+            height: 44dvh;
+        }
+        @media (min-width: 768px) {
+            #left-pane {
+                height: 100%;          /* PC: 全高 */
+                width: 40%;
+                max-width: 420px;
+            }
+        }
+        @media (min-width: 1024px) {
+            #left-pane { width: 33.333%; }
+        }
+
+        /* ===== 右ペイン：残りスペースをすべて使う ===== */
+        #right-pane {
+            flex: 1;
+            min-height: 0;            /* flex子要素のオーバーフローを正しく処理 */
+            display: flex;
+            flex-direction: column;
+        }
+
+        /* ===== タイピングエリア ===== */
+        #typing-area-wrapper {
+            flex: 1;
+            display: flex;
+            flex-direction: column;
+            justify-content: center;
+            min-height: 0;
+        }
+
+        /* ===== タイトル画面アニメーション ===== */
+        @keyframes fadeInUp {
+            from { opacity: 0; transform: translateY(30px); }
+            to   { opacity: 1; transform: translateY(0); }
+        }
+        .animate-fade-in-up { animation: fadeInUp 1s cubic-bezier(0.16,1,0.3,1) forwards; }
+        @keyframes float {
+            0%,100% { transform: translateY(0); }
+            50%      { transform: translateY(-10px); }
+        }
+        .animate-float { animation: float 4s ease-in-out infinite; }
+
+        /* ===== ヒートゲージ ===== */
+        .heat-glow {
+            box-shadow: 0 0 20px rgba(249,115,22,0.6);
+            border-color: rgba(249,115,22,0.5) !important;
+        }
+
+        /* ===== ヘルプパネル ===== */
+        #help-panel {
+            transition: transform 0.4s cubic-bezier(0.16,1,0.3,1), opacity 0.4s ease;
+        }
+        #help-panel.hidden-panel  { transform: translateX(100%); opacity: 0; pointer-events: none; }
+        #help-panel.visible-panel { transform: translateX(0);    opacity: 1; pointer-events: auto; }
+        .help-section-title {
+            background: linear-gradient(90deg, rgba(59,130,246,0.2), transparent);
+            border-left: 3px solid #3b82f6;
+        }
+        .help-badge { display:inline-block; padding:1px 8px; border-radius:9999px; font-size:10px; font-weight:700; letter-spacing:.05em; }
+        @keyframes helpPulse {
+            0%,100% { box-shadow: 0 0 0 0 rgba(59,130,246,0.4); }
+            50%      { box-shadow: 0 0 0 6px rgba(59,130,246,0); }
+        }
+        #help-btn { animation: helpPulse 3s ease-in-out infinite; }
+
+        /* ===== モバイル用：リソース横並び ===== */
+        #resource-bar {
+            display: flex;
+            flex-direction: row;
+            gap: 4px;
+            align-items: stretch;
+        }
+        @media (min-width: 768px) {
+            #resource-bar {
+                flex-direction: column;
+                gap: 12px;
+            }
+        }
+        .resource-item {
+            flex: 1;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            padding: 6px 4px;
+            border-radius: 8px;
+            background: #030712;
+            border: 1px solid #1f2937;
+            min-width: 0;
+        }
+        @media (min-width: 768px) {
+            .resource-item {
+                flex-direction: row;
+                justify-content: space-between;
+                padding: 10px 14px;
+                border-radius: 12px;
+            }
+        }
+
+        /* タブのラベルをモバイルで非表示にして省スペース化 */
+        .tab-label { display: none; }
+        @media (min-width: 480px) { .tab-label { display: block; } }
+
+        /* safe-area (iPhone ノッチ/ホームバー対応) */
+        #tab-content { padding-bottom: max(1.5rem, env(safe-area-inset-bottom)); }
+
+        /* ===== モバイル入力 =====
+           iOS Safari は要素がビューポート内・可視状態でないと
+           focus() してもキーボードが出ない。
+           そのため typing-box の上に 0×0 で重ねるのではなく
+           1×1px を opacity:0 で typing-box 内に置く。
+        */
+        #mobile-input {
+            position: absolute;
+            bottom: 8px; left: 50%;
+            transform: translateX(-50%);
+            width: 1px; height: 1px;
+            opacity: 0;
+            border: none; outline: none;
+            background: transparent; color: transparent;
+            caret-color: transparent;
+            /* タッチ操作は typing-box 自体が受け取る */
+            pointer-events: none;
+            font-size: 16px; /* iOS が自動ズームしないよう16px以上必要 */
+        }
+        #mobile-tap-hint { transition: opacity 0.3s; }
+        #typing-box.mobile-active {
+            border-color: rgba(249,115,22,0.6);
+            box-shadow: 0 0 0 2px rgba(249,115,22,0.25);
+        }
+    </style>
+</head>
+<body class="bg-gray-950 text-gray-100 font-mono selection:bg-purple-900">
+
+
+    <!-- トースト通知 -->
+    <div id="toast-container" class="fixed bottom-4 right-4 z-50 flex flex-col gap-2 pointer-events-none"></div>
+
+    <!-- ヘルプボタン（右上固定。モバイルはアイコンのみ） -->
+    <button id="help-btn" onclick="toggleHelp()"
+        class="fixed top-2 right-2 z-[200] flex items-center gap-1.5
+               bg-blue-600/20 hover:bg-blue-600/40 border border-blue-500/60 hover:border-blue-400
+               text-blue-300 hover:text-white font-bold rounded-full
+               px-2 py-1.5 md:px-4 md:py-2 text-xs md:text-sm
+               transition-all shadow-lg backdrop-blur-sm">
+        <i data-lucide="circle-help" class="w-4 h-4 shrink-0"></i>
+        <span class="hidden sm:inline">ヘルプ</span>
+    </button>
+
+    <!-- ヘルプパネル -->
+    <div id="help-panel" class="hidden-panel fixed top-0 right-0 h-full w-full sm:w-[400px] bg-gray-950/98 border-l border-blue-500/30 z-[150] overflow-y-auto custom-scrollbar">
+        <div class="sticky top-0 bg-gray-950/95 backdrop-blur-sm border-b border-gray-800 p-4 flex items-center justify-between z-10">
+            <div class="flex items-center gap-2">
+                <i data-lucide="book-open" class="w-5 h-5 text-blue-400"></i>
+                <h2 class="text-base font-black text-white tracking-wider">GAME GUIDE</h2>
+                <span class="help-badge bg-blue-500/20 text-blue-300 border border-blue-500/30">v1.0</span>
+            </div>
+            <button onclick="toggleHelp()" class="text-gray-400 hover:text-white transition-colors p-1 rounded-lg hover:bg-gray-800">
+                <i data-lucide="x" class="w-5 h-5"></i>
+            </button>
+        </div>
+        <div class="p-4 space-y-5 text-sm">
+            <div>
+                <div class="help-section-title px-3 py-2 mb-3 rounded-r-lg">
+                    <span class="text-blue-300 font-bold text-xs tracking-widest uppercase flex items-center gap-2"><i data-lucide="info" class="w-3.5 h-3.5"></i> ゲーム概要</span>
+                </div>
+                <p class="text-gray-300 leading-relaxed">キーボードで単語を入力して <span class="text-yellow-400 font-bold">WP（ワードポイント）</span> を稼ぐインフレ系タイピングRPGです。WPでアルファベットや単語をアップグレードし、さらに強力な自動生産マシンへと育てましょう。</p>
+            </div>
+            <div>
+                <div class="help-section-title px-3 py-2 mb-3 rounded-r-lg">
+                    <span class="text-yellow-300 font-bold text-xs tracking-widest uppercase flex items-center gap-2"><i data-lucide="coins" class="w-3.5 h-3.5"></i> 通貨システム</span>
+                </div>
+                <div class="space-y-2">
+                    <div class="bg-gray-900 rounded-xl p-3 border border-yellow-500/20">
+                        <div class="flex items-center gap-2 mb-1"><i data-lucide="coins" class="w-4 h-4 text-yellow-400"></i><span class="font-bold text-yellow-400 text-xs">WP（ワードポイント）</span></div>
+                        <p class="text-gray-400 text-xs">基本通貨。単語を入力するたびに獲得。</p>
+                    </div>
+                    <div class="bg-gray-900 rounded-xl p-3 border border-cyan-500/20">
+                        <div class="flex items-center gap-2 mb-1"><i data-lucide="diamond" class="w-4 h-4 text-cyan-400"></i><span class="font-bold text-cyan-400 text-xs">Crystal（クリスタル）</span></div>
+                        <p class="text-gray-400 text-xs">中級通貨。WP 5,000 → Crystal 1 に交換。上位強化に使用。</p>
+                    </div>
+                    <div class="bg-gray-900 rounded-xl p-3 border border-pink-500/20">
+                        <div class="flex items-center gap-2 mb-1"><i data-lucide="star" class="w-4 h-4 text-pink-400 fill-pink-400"></i><span class="font-bold text-pink-400 text-xs">Stardust（スターダスト）</span></div>
+                        <p class="text-gray-400 text-xs">最上位通貨。Crystal 5,000 → Stardust 1 に交換。究極強化に使用。</p>
+                    </div>
+                </div>
+            </div>
+            <div>
+                <div class="help-section-title px-3 py-2 mb-3 rounded-r-lg">
+                    <span class="text-green-300 font-bold text-xs tracking-widest uppercase flex items-center gap-2"><i data-lucide="keyboard" class="w-3.5 h-3.5"></i> タイピングの基本</span>
+                </div>
+                <div class="space-y-2 text-gray-300 leading-relaxed text-xs">
+                    <p>🔵 <span class="text-white font-semibold">メイン単語</span>：画面に表示される単語を入力するとWPを獲得。自動入力もされるが、手動で打つとより多くのボーナスを得られる。</p>
+                    <p>🟠 <span class="text-orange-400 font-semibold">HEAT TARGET</span>：手動専用。入力するとヒートゲージが回復し、追加WPも獲得できる。ヒートガチャで解放。</p>
+                    <p class="text-gray-500">※ キーボードで直接タイプするだけ。クリック不要。</p>
+                </div>
+            </div>
+            <div>
+                <div class="help-section-title px-3 py-2 mb-3 rounded-r-lg">
+                    <span class="text-orange-300 font-bold text-xs tracking-widest uppercase flex items-center gap-2"><i data-lucide="flame" class="w-3.5 h-3.5"></i> OVERCLOCK</span>
+                </div>
+                <div class="bg-gray-900 rounded-xl p-3 border border-orange-500/20 text-gray-300 text-xs space-y-1">
+                    <p>ヒートゲージが溜まるほど <span class="text-orange-400 font-bold">OVERCLOCKマルチプライヤー</span> が上昇し、獲得WPが大幅に増加します。</p>
+                    <p class="text-gray-400">HEAT TARGETを積極的に入力してゲージを維持しよう。</p>
+                </div>
+            </div>
+            <div>
+                <div class="help-section-title px-3 py-2 mb-3 rounded-r-lg">
+                    <span class="text-amber-300 font-bold text-xs tracking-widest uppercase flex items-center gap-2"><i data-lucide="sparkles" class="w-3.5 h-3.5"></i> 単語ガチャ</span>
+                </div>
+                <div class="space-y-2 text-xs">
+                    <div class="bg-gray-900 rounded-lg p-2.5 border border-yellow-700/40"><p class="font-bold text-yellow-400 mb-0.5">ワードガチャ (WP)</p><p class="text-gray-400">1回 3,000WP / 10連 27,000WP / 100連 270,000WP</p></div>
+                    <div class="bg-gray-900 rounded-lg p-2.5 border border-cyan-700/40"><p class="font-bold text-cyan-400 mb-0.5">プレミアムガチャ (Crystal)</p><p class="text-gray-400">1回 5 / 10連 45 / 100連 450</p></div>
+                    <div class="bg-gray-900 rounded-lg p-2.5 border border-orange-700/40"><p class="font-bold text-orange-400 mb-0.5">ヒートガチャ (WP)</p><p class="text-gray-400">1回 5,000WP / 10連 45,000WP / 100連 450,000WP</p></div>
+                    <div class="bg-gray-900 rounded-lg p-2.5 border border-gray-700">
+                        <p class="font-bold text-gray-200 mb-1">重複時の挙動</p>
+                        <ul class="text-gray-400 space-y-0.5">
+                            <li>未解放 → <span class="text-green-400">✨ 新規解放</span></li>
+                            <li>解放済み → <span class="text-blue-400">⬆ 強化</span>（Lv UP）</li>
+                            <li>Lv MAX → <span class="text-yellow-400">🌟 進化</span>（ティアUP）</li>
+                            <li>最終形態MAX → <span class="text-cyan-400">💫 限界突破</span>（+2%）</li>
+                        </ul>
+                    </div>
+                    <div class="bg-gray-900 rounded-lg p-2.5 border border-pink-700/40"><p class="font-bold text-pink-400 mb-0.5">天井</p><p class="text-gray-400">100連以内に必ずSSR以上が排出。ガチャ種別ごとに独立。</p></div>
+                </div>
+            </div>
+            <div>
+                <div class="help-section-title px-3 py-2 mb-3 rounded-r-lg">
+                    <span class="text-rose-300 font-bold text-xs tracking-widest uppercase flex items-center gap-2"><i data-lucide="refresh-cw" class="w-3.5 h-3.5"></i> 転生システム</span>
+                </div>
+                <div class="text-xs space-y-2 text-gray-300">
+                    <p>累計WPが閾値に達すると転生可能。転生すると <span class="text-yellow-400 font-bold">PP（転生ポイント）</span> を獲得し、PPショップで永続強化できます。</p>
+                    <div class="grid grid-cols-2 gap-1.5">
+                        <div class="bg-red-900/20 border border-red-700/30 rounded-lg p-2"><p class="text-red-400 font-bold mb-1">⚠️ リセット</p><p class="text-gray-400 text-[10px]">WP・強化・単語・レリックなど</p></div>
+                        <div class="bg-green-900/20 border border-green-700/30 rounded-lg p-2"><p class="text-green-400 font-bold mb-1">✅ 引継ぎ</p><p class="text-gray-400 text-[10px]">PP・PPショップ強化・実績</p></div>
+                    </div>
+                </div>
+            </div>
+            <div>
+                <div class="help-section-title px-3 py-2 mb-3 rounded-r-lg">
+                    <span class="text-slate-300 font-bold text-xs tracking-widest uppercase flex items-center gap-2"><i data-lucide="layers" class="w-3.5 h-3.5"></i> ティアシステム</span>
+                </div>
+                <div class="grid grid-cols-5 gap-1 text-[10px] text-center">
+                    <div class="bg-gray-800 rounded-lg p-1.5 border border-gray-600"><span class="text-gray-400 font-bold block">T1</span><span class="text-gray-500">N</span></div>
+                    <div class="bg-orange-900/30 rounded-lg p-1.5 border border-orange-600/40"><span class="text-orange-400 font-bold block">T2</span><span class="text-orange-500/70">B</span></div>
+                    <div class="bg-slate-800/50 rounded-lg p-1.5 border border-slate-400/40"><span class="text-slate-300 font-bold block">T3</span><span class="text-slate-400/70">S</span></div>
+                    <div class="bg-yellow-900/30 rounded-lg p-1.5 border border-yellow-500/40"><span class="text-yellow-400 font-bold block">T4</span><span class="text-yellow-500/70">G</span></div>
+                    <div class="bg-cyan-900/30 rounded-lg p-1.5 border border-cyan-400/40"><span class="text-cyan-300 font-bold block">T5</span><span class="text-cyan-400/70">P</span></div>
+                </div>
+            </div>
+            <div class="bg-gradient-to-br from-blue-950/60 to-purple-950/40 rounded-xl p-3 border border-blue-500/20">
+                <p class="font-bold text-blue-300 mb-2 flex items-center gap-2 text-xs tracking-widest uppercase"><i data-lucide="lightbulb" class="w-3.5 h-3.5 text-yellow-400"></i> 攻略ヒント</p>
+                <ul class="space-y-1 text-gray-300 text-xs leading-relaxed">
+                    <li>💡 序盤はよく使う文字（E, A, T, Iなど）を優先強化しよう</li>
+                    <li>💡 手動でHEAT TARGETを入力してゲージを高く維持すると効率UP</li>
+                    <li>💡 WPが余ってきたらCrystalに変換してプレミアムガチャを引こう</li>
+                    <li>💡 100連で天井（SSR確定）。積極的にガチャを回そう</li>
+                    <li>💡 転生PPショップの上限解放から優先して購入しよう</li>
+                </ul>
+            </div>
+        </div>
+    </div>
+    <div id="help-overlay" onclick="toggleHelp()" class="fixed inset-0 bg-black/50 z-[140] hidden backdrop-blur-[2px]"></div>
+
+    <!-- モーダル -->
+    <div id="modal-overlay" class="fixed inset-0 bg-black/80 z-[100] hidden flex items-center justify-center backdrop-blur-sm">
+        <div class="bg-gray-900 border border-amber-500 rounded-2xl p-5 max-w-sm w-full mx-3 transform scale-95 transition-transform duration-300 shadow-[0_0_30px_rgba(245,158,11,0.2)]" id="modal-content">
+            <h2 class="text-xl font-bold text-amber-400 mb-3 text-center flex items-center justify-center">
+                <i data-lucide="sparkles" class="w-5 h-5 mr-2"></i><span id="modal-title"></span>
+            </h2>
+            <div id="modal-body" class="text-gray-200 mb-4 space-y-2 text-center text-xs sm:text-sm max-h-52 overflow-y-auto custom-scrollbar font-bold border-y border-gray-800 py-3"></div>
+            <button onclick="closeModal()" class="w-full py-2.5 bg-amber-600 hover:bg-amber-500 text-white font-bold rounded-lg transition-colors">閉じる</button>
+        </div>
+    </div>
+
+    <!-- タイトル画面 -->
+    <div id="title-screen" class="fixed inset-0 z-50 bg-gray-950 flex flex-col items-center justify-center transition-opacity duration-1000">
+        <div class="absolute inset-0 bg-[linear-gradient(to_right,#4f4f4f2e_1px,transparent_1px),linear-gradient(to_bottom,#4f4f4f2e_1px,transparent_1px)] bg-[size:4rem_4rem] [mask-image:radial-gradient(ellipse_60%_50%_at_50%_0%,#000_70%,transparent_100%)]"></div>
+        <div class="absolute inset-0 bg-gray-950/60 backdrop-blur-sm"></div>
+        <div class="relative z-10 flex flex-col items-center animate-fade-in-up px-4 text-center">
+            <div class="animate-float mb-4 relative">
+                <i data-lucide="keyboard" class="w-16 h-16 sm:w-24 sm:h-24 text-blue-500 drop-shadow-[0_0_20px_rgba(59,130,246,0.8)] relative z-10"></i>
+                <div class="absolute inset-0 bg-blue-500 blur-3xl opacity-30 rounded-full"></div>
+            </div>
+            <h1 class="text-4xl sm:text-6xl lg:text-8xl font-black text-transparent bg-clip-text bg-gradient-to-r from-cyan-400 via-blue-500 to-purple-600 tracking-tighter mb-3">Typing Clicker</h1>
+            <p class="text-gray-400 text-xs sm:text-base tracking-widest mb-8 max-w-lg leading-relaxed">文字を打ち、単語を解放し、宇宙の真理へと至れ。<br>究極のインフレ・タイピングRPG</p>
+            <button onclick="startGame()" class="group relative px-8 py-3 sm:px-10 sm:py-4 bg-blue-600/20 border border-blue-500/50 hover:border-blue-400 text-white font-bold text-lg sm:text-xl rounded-full transition-all hover:scale-105 hover:shadow-[0_0_30px_rgba(59,130,246,0.6)] overflow-hidden">
+                <span class="relative z-10 flex items-center tracking-wider">GAME START <i data-lucide="arrow-right" class="ml-3 w-5 h-5 group-hover:translate-x-2 transition-transform"></i></span>
+                <div class="absolute inset-0 bg-gradient-to-r from-blue-600 via-purple-600 to-cyan-600 opacity-0 group-hover:opacity-100 transition-opacity -z-0"></div>
+            </button>
+        </div>
+    </div>
+
+    <!-- ===== メインアプリ ===== -->
+    <div id="app">
+
+        <!-- 左ペイン：リソース＋タイピング -->
+        <div id="left-pane" class="border-b md:border-b-0 md:border-r border-gray-800 bg-gray-900 custom-scrollbar p-2 sm:p-3 md:p-4">
+
+            <!-- リソースバー -->
+            <div id="resource-bar" class="mb-2 md:mb-4 shrink-0">
+                <!-- WP -->
+                <div class="resource-item">
+                    <div class="flex items-center gap-1 text-yellow-400">
+                        <i data-lucide="coins" class="w-3.5 h-3.5 md:w-5 md:h-5 shrink-0"></i>
+                        <span id="wp-display" class="text-sm md:text-xl font-bold truncate">0</span>
+                    </div>
+                    <span class="text-[9px] md:text-xs text-gray-500 mt-0.5 md:mt-0">WP</span>
+                </div>
+                <!-- Crystal -->
+                <div class="resource-item">
+                    <div class="flex items-center gap-1 text-cyan-400">
+                        <i data-lucide="diamond" class="w-3.5 h-3.5 md:w-5 md:h-5 shrink-0 fill-cyan-400/20"></i>
+                        <span id="crystal-display" class="text-sm md:text-xl font-bold truncate">0</span>
+                    </div>
+                    <span class="text-[9px] md:text-xs text-gray-500 mt-0.5 md:mt-0">Crystal</span>
+                </div>
+                <!-- Stardust -->
+                <div class="resource-item border-t-0 md:border-t md:border-t-gray-800">
+                    <div class="flex items-center gap-1 text-pink-400">
+                        <i data-lucide="star" class="w-3.5 h-3.5 md:w-5 md:h-5 shrink-0 fill-pink-400"></i>
+                        <span id="stardust-display" class="text-sm md:text-xl font-bold truncate">0</span>
+                    </div>
+                    <span class="text-[9px] md:text-xs text-pink-500/70 mt-0.5 md:mt-0">Stardust</span>
+                </div>
+            </div>
+
+            <!-- パッシブ倍率表示 -->
+            <div id="final-multi-display" class="hidden shrink-0 bg-pink-900/20 border border-pink-500/30 rounded-lg p-1.5 mb-2 text-center text-[10px] md:text-xs"></div>
+
+            <!-- タイピングエリア -->
+            <div id="typing-area-wrapper">
+                <div id="typing-box" class="bg-gray-800/80 w-full rounded-xl md:rounded-2xl p-3 sm:p-4 border border-gray-700 shadow-xl text-center relative overflow-hidden transition-all duration-300 flex flex-col cursor-pointer md:cursor-default"
+                     ontouchstart="handleTypingTap(event)" onclick="focusMobileInput()">
+                    <div class="absolute top-0 left-0 w-full h-0.5 bg-gradient-to-r from-purple-500 via-pink-500 to-blue-500 opacity-50"></div>
+
+                    <!-- メイン単語 -->
+                    <div class="mb-2 md:mb-4">
+                        <div class="text-[9px] sm:text-xs text-gray-400 mb-1 flex items-center justify-center">
+                            <i data-lucide="bot" class="w-3 h-3 mr-1"></i> メイン単語
+                        </div>
+                        <div id="word-display" class="text-2xl sm:text-3xl md:text-4xl lg:text-5xl font-bold tracking-widest flex justify-center space-x-1 mb-2 flex-wrap"></div>
+                        <div class="inline-block bg-gray-900 rounded-full px-2 py-0.5 border border-gray-700">
+                            <span class="text-[9px] sm:text-xs text-gray-400 mr-1">ボーナス:</span>
+                            <span id="bonus-display" class="text-yellow-400 font-bold text-[10px] sm:text-xs">+0 WP</span>
+                        </div>
+                    </div>
+
+                    <!-- ヒート単語 -->
+                    <div class="pt-2 md:pt-3 border-t border-gray-700/80 bg-gray-900/40 -mx-3 sm:-mx-4 px-3 sm:px-4 pb-1 md:pb-2">
+                        <div class="flex justify-between items-center mb-1">
+                            <span class="text-[9px] sm:text-xs text-orange-400 font-bold flex items-center tracking-wider animate-pulse">
+                                <i data-lucide="flame" class="w-3 h-3 mr-1"></i> HEAT TARGET
+                            </span>
+                        </div>
+                        <div id="heat-word-display" class="text-xl sm:text-2xl md:text-3xl font-black tracking-widest flex justify-center space-x-1 mb-1 flex-wrap drop-shadow-[0_0_5px_rgba(249,115,22,0.8)]"></div>
+                        <div class="flex justify-center space-x-3">
+                            <span id="heat-recover-display" class="text-[9px] sm:text-xs text-red-400 font-bold">ヒート回復: +0</span>
+                            <span id="heat-bonus-display" class="text-[9px] sm:text-xs text-yellow-500 font-bold">WP: +0</span>
+                        </div>
+                    </div>
+
+                    <!-- ヒートゲージ -->
+                    <div class="w-full mt-2 md:mt-3 bg-gray-900/80 p-2 md:p-3 rounded-xl border border-gray-800">
+                        <div class="flex justify-between items-end mb-1 px-1">
+                            <span class="text-[9px] sm:text-xs font-bold text-gray-300">OVERCLOCK</span>
+                            <span id="heat-multi-display" class="text-base sm:text-lg md:text-xl font-black text-white drop-shadow-[0_0_8px_rgba(249,115,22,0.8)]">x1.00</span>
+                        </div>
+                        <div class="w-full bg-gray-950 rounded-full h-3 md:h-4 border border-gray-700 overflow-hidden relative shadow-inner">
+                            <div id="heat-bar" class="h-full bg-gradient-to-r from-yellow-500 via-orange-500 to-red-600 transition-all duration-100 ease-out w-0 relative">
+                                <div class="absolute top-0 right-0 bottom-0 w-8 bg-gradient-to-r from-transparent to-white opacity-30"></div>
+                            </div>
+                        </div>
+                    </div>
+                    <!-- モバイル用：キーボード呼び出しヒント -->
+                    <div id="mobile-tap-hint" class="mt-2 flex items-center justify-center gap-1.5 md:hidden text-[10px] text-gray-500 select-none">
+                        <i data-lucide="keyboard" class="w-3 h-3 shrink-0"></i>
+                        <span id="mobile-hint-text">タップしてキーボードを開く</span>
+                    </div>
+                    <!-- iOS用: viewport内に置かないとフォーカスでキーボードが出ない -->
+                    <input id="mobile-input" type="text"
+                        inputmode="text"
+                        autocomplete="off" autocorrect="off" autocapitalize="characters"
+                        spellcheck="false" readonly="readonly"
+                        aria-label="タイピング入力" tabindex="0">
+                </div>
+            </div>
+        </div>
+
+        <!-- 右ペイン：タブ＋コンテンツ -->
+        <div id="right-pane" class="bg-gray-900">
+            <!-- タブナビゲーション -->
+            <div id="tab-nav" class="flex border-b border-gray-800 bg-gray-950 shrink-0 overflow-x-auto no-scrollbar"></div>
+
+            <!-- コントロールバー -->
+            <div class="bg-gray-800/80 border-b border-gray-700 px-3 py-1.5 flex justify-end items-center shrink-0">
+                <span class="text-xs text-gray-400 mr-2 flex items-center"><i data-lucide="settings-2" class="w-3.5 h-3.5 mr-1"></i>購入モード</span>
+                <button onclick="toggleBuyMode()" id="btn-buy-mode"
+                    class="bg-blue-600 hover:bg-blue-500 border border-blue-400 rounded px-3 py-1 text-xs font-bold text-white transition-colors flex items-center">
+                    x1
+                </button>
+            </div>
+
+            <!-- タブコンテンツ -->
+            <div id="tab-content" class="flex-1 overflow-y-auto p-3 sm:p-4 md:p-6 custom-scrollbar"></div>
+        </div>
+    </div>
+
+<script>
+    function toggleHelp() {
+        const panel = document.getElementById('help-panel');
+        const overlay = document.getElementById('help-overlay');
+        const isVisible = panel.classList.contains('visible-panel');
+        if (isVisible) {
+            panel.classList.remove('visible-panel');
+            panel.classList.add('hidden-panel');
+            overlay.classList.add('hidden');
+        } else {
+            panel.classList.remove('hidden-panel');
+            panel.classList.add('visible-panel');
+            overlay.classList.remove('hidden');
+            lucide.createIcons();
+        }
+    }
+
+    // ===== モバイルキーボード入力 =====
+    const mobileInput = document.getElementById('mobile-input');
+    const typingBox   = document.getElementById('typing-box');
+    const hintText    = document.getElementById('mobile-hint-text');
+    const ALPHA = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ';
+
+    // readonly を外す（ゲーム開始前は入力受付しないため readonly にしてある）
+    function enableMobileInput() {
+        mobileInput.removeAttribute('readonly');
+    }
+
+    // touchstart: iOS で確実にキーボードを呼び出すには
+    // touchstart ハンドラの中で同期的に focus() を呼ぶ必要がある
+    function handleTypingTap(e) {
+        if (!window.isGameStarted) return;
+        // スクロール操作との区別のため touchend でなく touchstart で即 focus
+        enableMobileInput();
+        mobileInput.focus();
+        // デフォルト動作（スクロール等）はそのまま通す
+    }
+
+    function focusMobileInput() {
+        if (!window.isGameStarted) return;
+        enableMobileInput();
+        mobileInput.focus();
+    }
+
+    // フォーカス状態のビジュアル
+    mobileInput.addEventListener('focus', () => {
+        typingBox.classList.add('mobile-active');
+        if (hintText) hintText.textContent = '入力中 ⌨️';
+    });
+    mobileInput.addEventListener('blur', () => {
+        typingBox.classList.remove('mobile-active');
+        if (hintText) hintText.textContent = 'タップしてキーボードを開く';
+    });
+
+    // ===== 入力処理 =====
+    // beforeinput: 1文字入力のたびに発火。IME確定前の生の文字が取れる
+    mobileInput.addEventListener('beforeinput', (e) => {
+        if (e.inputType === 'insertText' && e.data) {
+            const ch = e.data.toUpperCase();
+            if (ALPHA.includes(ch)) {
+                document.dispatchEvent(new KeyboardEvent('keydown', {
+                    key: ch, code: 'Key' + ch, bubbles: true, cancelable: true
+                }));
+            }
+            // input の値を溜めさせない
+            e.preventDefault();
+        } else if (e.inputType !== 'insertCompositionText') {
+            // 削除・改行など不要な操作もブロック
+            e.preventDefault();
+        }
+    });
+
+    // input: beforeinput でキャッチできなかった環境のフォールバック
+    mobileInput.addEventListener('input', () => {
+        const raw = mobileInput.value.toUpperCase();
+        mobileInput.value = '';
+        for (const ch of raw) {
+            if (ALPHA.includes(ch)) {
+                document.dispatchEvent(new KeyboardEvent('keydown', {
+                    key: ch, code: 'Key' + ch, bubbles: true, cancelable: true
+                }));
+            }
+        }
+    });
+
+    // IME変換中の入力はすべてキャンセル（日本語入力の誤爆防止）
+    mobileInput.addEventListener('compositionstart', () => { mobileInput.value = ''; });
+    mobileInput.addEventListener('compositionend',   () => { mobileInput.value = ''; });
+
+    // キーボードが閉じても blur しないよう、画面タッチ全体でフォーカス維持を試みる
+    document.addEventListener('touchend', (e) => {
+        if (!window.isGameStarted) return;
+        // ヘルプパネル・モーダル・タブ操作以外ならフォーカスを戻す
+        const excluded = ['help-panel','modal-overlay','tab-nav','btn-buy-mode','help-btn'];
+        const target = e.target;
+        if (excluded.some(id => document.getElementById(id)?.contains(target))) return;
+        // ボタン要素はそのまま通す
+        if (target.tagName === 'BUTTON' || target.closest('button')) return;
+        // タイピングエリア以外をタップした後も入力を維持
+        setTimeout(() => { if (document.activeElement !== mobileInput) mobileInput.focus(); }, 100);
+    }, { passive: true });
+
+    // ゲーム開始時に自動フォーカス
+    document.addEventListener('gameStarted', () => {
+        setTimeout(() => {
+            enableMobileInput();
+            mobileInput.focus();
+        }, 300);
+    });
+</script>
+<script src="game.js"></script>
+<input type="text" id="hidden-input" style="position: absolute; opacity: 0; pointer-events: none; left: -9999px;">
+</body>
+</html>
